@@ -50,20 +50,33 @@ def add_or_update_user(user_id):
         upsert=True
     )
 
+async def check_channel_membership(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
+    """Force user to join channel before using bot."""
+    try:
+        member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+    except:
+        pass
+    await update.message.reply_text(
+        f"⚠️ You must join the channel {CHANNEL_ID} to use this bot."
+    )
+    return False
+
 # -------- HANDLERS --------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not await check_channel_membership(update, user.id):
+    if not await check_channel_membership(update, user.id, context):
         return
     add_or_update_user(user.id)
-    await update.message.reply_text("Welcome! You can now send files to get shareable links.")
+    await update.message.reply_text("Welcome! Send me a file to get a permanent shareable link.")
 
 async def start_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not await check_channel_membership(update, user.id):
+    if not await check_channel_membership(update, user.id, context):
         return
     if not is_user_allowed(user.id):
         await update.message.reply_text("⏳ Your 3-hour access has expired. Send /start again to refresh.")
@@ -91,20 +104,6 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Unsupported file type.")
 
-# -------- CHANNEL CHECK --------
-async def check_channel_membership(update: Update, user_id):
-    """Force user to join channel before using bot."""
-    try:
-        member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
-        if member.status in ["member", "administrator", "creator"]:
-            return True
-    except:
-        pass
-    await update.message.reply_text(
-        f"⚠️ You must join the channel {CHANNEL_ID} to use this bot."
-    )
-    return False
-
 # -------- MAIN --------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
@@ -114,10 +113,10 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"^/start "), start_link))
 
     # File handlers
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_files))
-    app.add_handler(MessageHandler(filters.VIDEO.ALL, handle_files))
-    app.add_handler(MessageHandler(filters.AUDIO.ALL, handle_files))
-    app.add_handler(MessageHandler(filters.PHOTO.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.DOCUMENT, handle_files))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_files))
+    app.add_handler(MessageHandler(filters.AUDIO, handle_files))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_files))
 
     print("🤖 Bot is running...")
     app.run_polling()
