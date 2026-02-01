@@ -1,4 +1,3 @@
-pyrogram==2.0.106
-tgcrypto
-pymongo
-dnspython
+python-telegram-bot==21.6
+pymongo==4.6.1
+dnspython==2.6.1
