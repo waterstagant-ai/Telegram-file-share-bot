@@ -24,30 +24,39 @@ app = Client(
 
 # ─── START COMMAND ─────────────────────────────────
 
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
 @app.on_message(filters.command("start") & filters.private)
 async def start(client, msg):
     user_id = msg.from_user.id
 
-    # Force join channel
+    # ADMIN BYPASS
+    if user_id == ADMIN_ID:
+        if len(msg.command) == 1:
+            return await msg.reply(
+                "👑 Admin mode active.\nSend me a file."
+            )
+
+    # FORCE JOIN FOR NORMAL USERS
     try:
         member = await client.get_chat_member(CHANNEL_ID, user_id)
         if member.status == "left":
             raise
     except:
+        join_button = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔔 Join Channel", url="https://t.me/+CLfnma8b2jM0YWQ1")]]
+        )
         return await msg.reply(
             "🔒 You must join our channel to use this bot.\n\n"
-            "After joining, come back and press /start"
+            "After joining, come back and press /start",
+            reply_markup=join_button
         )
 
-    # Normal /start
+    # NORMAL START
     if len(msg.command) == 1:
-        if user_id == ADMIN_ID:
-            await msg.reply("👑 Admin mode active.\nSend me a file.")
-        else:
-            await msg.reply("✅ Access granted.\nSend /start link to get files.")
-        return
+        return await msg.reply("✅ Access granted.\nUse file links to get files.")
 
-    # /start FILECODE
+    # FILE DELIVERY
     code = msg.command[1]
     file = files.find_one({"code": code})
 
