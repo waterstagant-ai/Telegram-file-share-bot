@@ -1,138 +1,113 @@
 import os
 import uuid
-from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update
+from telegram.ext import (
+    Application,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 from pymongo import MongoClient
 
-print("🚀 Bot file loaded")
-
-# ─── ENV VARIABLES ────────────────────────────────
-
+# ====== CONFIG ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
 MONGO_URL = os.getenv("MONGO_URL")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-BOT_USERNAME = os.getenv("BOT_USERNAME").replace("@", "")
 
-CHANNEL_INVITE_LINK = "https://t.me/+CLfnma8b2jM0YWQ1"
+CHANNEL_LINK = "https://t.me/+CLfnma8b2jM0YWQ1"   # your channel invite
+CHANNEL_ID = -1003510118476                     # your channel ID
+BASE_LINK = "https://t.me/SpicyParlourCool_bot?start="  # change bot username
 
-# ─── DATABASE ─────────────────────────────────────
+# ====================
 
 mongo = MongoClient(MONGO_URL)
-db = mongo["FileBot"]
-files = db["files"]
+db = mongo["filebot"]
+files_col = db["files"]
 
-# ─── BOT ──────────────────────────────────────────
 
-app = Client(
-    "FileBot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
-
-pending_files = {}
-
-# ─── START COMMAND ────────────────────────────────
-
-@app.on_message(filters.command("start") & filters.private)
-async def start(client, msg):
-    user_id = msg.from_user.id
-    file_code = msg.command[1] if len(msg.command) > 1 else None
-
-    # ADMIN BYPASS
-    if user_id == ADMIN_ID and not file_code:
-        return await msg.reply("👑 Admin mode active.\nSend me a file.")
-
-    if file_code:
-        pending_files[user_id] = file_code
-
-    # FORCE JOIN CHECK
+async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        member = await client.get_chat_member(CHANNEL_ID, user_id)
-        if member.status == "left":
-            raise
+        member = await context.bot.get_chat_member(
+            CHANNEL_ID, update.effective_user.id
+        )
+        return member.status in ["member", "administrator", "creator"]
     except:
-        buttons = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔔 Join Channel", url=CHANNEL_INVITE_LINK)],
-            [InlineKeyboardButton("✅ I Joined", callback_data="check_join")]
-        ])
-        return await msg.reply(
-            "🔒 You must join our channel to access this file.\n\n"
-            "Join first, then tap **I Joined**.",
-            reply_markup=buttons
-        )
+        return False
 
-    # SEND FILE DIRECTLY IF ALREADY JOINED
-    if file_code:
-        file = files.find_one({"code": file_code})
-        if not file:
-            return await msg.reply("❌ Invalid or deleted link.")
 
-        return await msg.reply_document(
-            file["file_id"],
-            protect_content=True
-        )
-
-    await msg.reply("✅ Access granted.")
-
-# ─── JOIN CHECK CALLBACK ──────────────────────────
-
-@app.on_callback_query(filters.regex("^check_join$"))
-async def check_join_callback(client, callback):
-    user_id = callback.from_user.id
-
-    try:
-        member = await client.get_chat_member(CHANNEL_ID, user_id)
-        if member.status == "left":
-            raise
-    except:
-        return await callback.answer(
-            "❌ You haven't joined yet!",
-            show_alert=True
-        )
-
-    code = pending_files.pop(user_id, None)
-
-    if not code:
-        return await callback.message.edit_text(
-            "✅ Membership verified.\nNo pending file."
-        )
-
-    file = files.find_one({"code": code})
-    if not file:
-        return await callback.message.edit_text(
-            "❌ File not found or deleted."
-        )
-
-    await callback.message.delete()
-    await callback.message.reply_document(
-        file["file_id"],
-        protect_content=True
+async def force_join(update: Update):
+    await update.message.reply_text(
+        "🚫 **You must join our channel to access files**\n\n"
+        f"👉 Join here: {CHANNEL_LINK}\n\n"
+        "After joining, **open the file link again**.",
+        disable_web_page_preview=True
     )
 
-# ─── ADMIN FILE UPLOAD ────────────────────────────
 
-@app.on_message(filters.document & filters.private)
-async def upload(client, msg):
-    if msg.from_user.id != ADMIN_ID:
-        return await msg.reply("❌ Only admin can upload files.")
+async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await is_joined(update, context):
+        await force_join(update)
+        return
 
-    code = uuid.uuid4().hex[:10]
+    msg = update.message
+    file_id = (
+        msg.document.file_id if msg.document else
+        msg.video.file_id if msg.video else
+        msg.audio.file_id if msg.audio else
+        msg.photo[-1].file_id
+    )
 
-    files.insert_one({
-        "code": code,
-        "file_id": msg.document.file_id
+    unique_id = str(uuid.uuid4())[:8]
+
+    files_col.insert_one({
+        "_id": unique_id,
+        "file_id": file_id
     })
 
-    link = f"https://t.me/{BOT_USERNAME}?start={code}"
+    link = BASE_LINK + unique_id
 
-    await msg.reply(
-        "📁 File uploaded successfully!\n\n"
-        f"🔗 Permanent Link:\n{link}"
+    await msg.reply_text(
+        "✅ **File stored successfully!**\n\n"
+        "🔗 **Permanent Link:**\n"
+        f"{link}\n\n"
+        "⚠️ File cannot be downloaded inside bot.",
+        disable_web_page_preview=True
     )
 
-print("🤖 Bot starting...")
-app.run()
+
+async def start_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        return
+
+    if not await is_joined(update, context):
+        await force_join(update)
+        return
+
+    file_code = context.args[0]
+    data = files_col.find_one({"_id": file_code})
+
+    if not data:
+        await update.message.reply_text("❌ File not found.")
+        return
+
+    await context.bot.send_document(
+        chat_id=update.effective_user.id,
+        document=data["file_id"]
+    )
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.Video.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.Audio.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.Photo.ALL, handle_files))
+
+    app.add_handler(MessageHandler(filters.Regex("^/start "), start_link))
+
+    print("🤖 Bot is running...")
+    app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
