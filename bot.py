@@ -12,10 +12,10 @@ from telegram.ext import (
 from pymongo import MongoClient
 
 # -------- CONFIG --------
-BOT_TOKEN = "YOUR_BOT_TOKEN"
-MONGO_URL = "YOUR_MONGO_URL"
-ADMIN_ID = 123456789  # <-- your Telegram ID
-CHANNEL_ID = "@YourChannelUsername"
+BOT_TOKEN = "7800121058:AAEr9FUy7wIjgXZSJ0snwfzlUQSJGXFEOIs"
+MONGO_URL = "mongodb+srv://Faizalsheikh:<db_password>@cluster0.ibd5h5x.mongodb.net/?appName=Cluster0"
+ADMIN_ID = 7450686441  # <-- your Telegram ID
+CHANNEL_ID = "-1003510118476"
 USER_TIMER_HOURS = 3
 
 # -------- LOGGING --------
