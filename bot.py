@@ -37,9 +37,7 @@ def is_user_allowed(user_id):
     user = users_collection.find_one({"user_id": user_id})
     if not user:
         return False
-    if datetime.utcnow() < user["expiry"]:
-        return True
-    return False
+    return datetime.utcnow() < user["expiry"]
 
 def add_or_update_user(user_id):
     """Add new user or refresh expiry."""
@@ -99,8 +97,8 @@ async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file_type = "Photo"
 
     if file:
-        file_link = await file.get_file()
-        await update.message.reply_text(f"✅ {file_type} link:\n{file_link.file_path}")
+        file_info = await file.get_file()
+        await update.message.reply_text(f"✅ {file_type} link:\n{file_info.file_path}")
     else:
         await update.message.reply_text("❌ Unsupported file type.")
 
@@ -112,11 +110,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex(r"^/start "), start_link))
 
-    # File handlers
-    app.add_handler(MessageHandler(filters.DOCUMENT, handle_files))
-    app.add_handler(MessageHandler(filters.VIDEO, handle_files))
-    app.add_handler(MessageHandler(filters.AUDIO, handle_files))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_files))
+    # File handlers (v20+ correct filters)
+    app.add_handler(MessageHandler(filters.Message.document, handle_files))
+    app.add_handler(MessageHandler(filters.Message.video, handle_files))
+    app.add_handler(MessageHandler(filters.Message.audio, handle_files))
+    app.add_handler(MessageHandler(filters.Message.photo, handle_files))
 
     print("🤖 Bot is running...")
     app.run_polling()
