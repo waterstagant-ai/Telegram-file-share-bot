@@ -1,124 +1,98 @@
-import os
 import logging
 from datetime import datetime, timedelta
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
 from pymongo import MongoClient
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# -------- CONFIG --------
+# -------------------- CONFIG --------------------
 BOT_TOKEN = "7800121058:AAEr9FUy7wIjgXZSJ0snwfzlUQSJGXFEOIs"
-MONGO_URL = "mongodb+srv://Faizalsheikh:<db_password>@cluster0.ibd5h5x.mongodb.net/?appName=Cluster0"
-ADMIN_ID = 7450686441  # <-- your Telegram ID
-CHANNEL_ID = "-1003510118476"
-USER_TIMER_HOURS = 3
+MONGO_URI = "mongodb+srv://Faizalsheikh:arsh2k03@cluster0.ibd5h5x.mongodb.net/Faizalsheikh?retryWrites=true&w=majority"
+CHANNEL_ID = -1003510118476
+EXPIRY_HOURS = 3
+# ------------------------------------------------
 
-# -------- LOGGING --------
+# -------------------- LOGGING -------------------
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
+# ------------------------------------------------
 
-# -------- DATABASE --------
-client = MongoClient(MONGO_URL)
-db = client["telegram_bot"]
-users_collection = db["users"]
+# ------------------ MONGO SETUP ----------------
+try:
+    mongo_client = MongoClient(MONGO_URI)
+    db = mongo_client["Faizalsheikh"]
+    users_collection = db["users"]
+    logger.info("MongoDB connected successfully")
+except Exception as e:
+    logger.error(f"MongoDB connection error: {e}")
+# ------------------------------------------------
 
-# -------- HELPERS --------
-def is_user_allowed(user_id):
-    """Check if user is within allowed time limit."""
-    if user_id == ADMIN_ID:
-        return True
-    user = users_collection.find_one({"user_id": user_id})
-    if not user:
-        return False
-    return datetime.utcnow() < user["expiry"]
-
+# --------------- HELPER FUNCTIONS --------------
 def add_or_update_user(user_id):
-    """Add new user or refresh expiry."""
-    expiry_time = datetime.utcnow() + timedelta(hours=USER_TIMER_HOURS)
-    users_collection.update_one(
-        {"user_id": user_id},
-        {"$set": {"expiry": expiry_time}},
-        upsert=True
-    )
+    """
+    Adds a new user or updates expiry if exists
+    """
+    try:
+        expiry_time = datetime.utcnow() + timedelta(hours=EXPIRY_HOURS)
+        result = users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"expiry": expiry_time}},
+            upsert=True
+        )
+        if result.upserted_id:
+            logger.info(f"New user added with user_id: {user_id}")
+        else:
+            logger.info(f"Existing user updated with user_id: {user_id}")
+    except Exception as e:
+        logger.error(f"Error in add_or_update_user: {e}")
 
-async def check_channel_membership(update: Update, user_id, context: ContextTypes.DEFAULT_TYPE):
-    """Force user to join channel before using bot."""
+async def is_user_in_channel(user_id, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Checks if user is in the required channel
+    """
     try:
         member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
         if member.status in ["member", "administrator", "creator"]:
             return True
-    except:
-        pass
-    await update.message.reply_text(
-        f"⚠️ You must join the channel {CHANNEL_ID} to use this bot."
-    )
-    return False
+        return False
+    except Exception as e:
+        logger.warning(f"Channel check failed: {e}")
+        return False
+# ------------------------------------------------
 
-# -------- HANDLERS --------
+# ---------------- COMMAND HANDLERS --------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not await check_channel_membership(update, user.id, context):
+
+    # Force join channel
+    in_channel = await is_user_in_channel(user.id, context)
+    if not in_channel:
+        await update.message.reply_text(
+            f"Hi {user.first_name}! You must join our channel to use this bot.\n"
+            f"Join here: t.me/YourChannelUsername"
+        )
         return
+
+    # Add or update user
     add_or_update_user(user.id)
-    await update.message.reply_text("Welcome! Send me a file to get a permanent shareable link.")
 
-async def start_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await start(update, context)
+    await update.message.reply_text(
+        f"Welcome {user.first_name}! You now have access for {EXPIRY_HOURS} hours."
+    )
+# ------------------------------------------------
 
-async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    if not await check_channel_membership(update, user.id, context):
-        return
-    if not is_user_allowed(user.id):
-        await update.message.reply_text("⏳ Your 3-hour access has expired. Send /start again to refresh.")
-        return
-
-    file = None
-    file_type = None
-
-    if update.message.document:
-        file = update.message.document
-        file_type = "Document"
-    elif update.message.video:
-        file = update.message.video
-        file_type = "Video"
-    elif update.message.audio:
-        file = update.message.audio
-        file_type = "Audio"
-    elif update.message.photo:
-        file = update.message.photo[-1]  # highest resolution
-        file_type = "Photo"
-
-    if file:
-        file_info = await file.get_file()
-        await update.message.reply_text(f"✅ {file_type} link:\n{file_info.file_path}")
-    else:
-        await update.message.reply_text("❌ Unsupported file type.")
-
-# -------- MAIN --------
+# ------------------- MAIN -----------------------
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # Command handlers
+    # Add command handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex(r"^/start "), start_link))
 
-    # File handlers (v20+ correct filters)
-    app.add_handler(MessageHandler(filters.Message.document, handle_files))
-    app.add_handler(MessageHandler(filters.Message.video, handle_files))
-    app.add_handler(MessageHandler(filters.Message.audio, handle_files))
-    app.add_handler(MessageHandler(filters.Message.photo, handle_files))
-
-    print("🤖 Bot is running...")
+    logger.info("Bot started")
     app.run_polling()
 
-# -------- RUN --------
 if __name__ == "__main__":
     main()
+# ------------------------------------------------
