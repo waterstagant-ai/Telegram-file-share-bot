@@ -1,3 +1,4 @@
+print("🚀 Bot file loaded")
 import os
 from pyrogram import Client, filters
 from pymongo import MongoClient
@@ -81,4 +82,5 @@ async def upload(client, msg):
     )
 
 print("Bot is running...")
+print("🤖 Bot starting...")
 app.run()
