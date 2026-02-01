@@ -98,11 +98,10 @@ async def start_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_files))
-    app.add_handler(MessageHandler(filters.Video.ALL, handle_files))
-    app.add_handler(MessageHandler(filters.Audio.ALL, handle_files))
-    app.add_handler(MessageHandler(filters.Photo.ALL, handle_files))
-
+    app.add_handler(MessageHandler(filters.DOCUMENT, handle_files))
+app.add_handler(MessageHandler(filters.VIDEO, handle_files))
+app.add_handler(MessageHandler(filters.AUDIO, handle_files))
+app.add_handler(MessageHandler(filters.PHOTO, handle_files))
     app.add_handler(MessageHandler(filters.Regex("^/start "), start_link))
 
     print("🤖 Bot is running...")
