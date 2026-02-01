@@ -1,112 +1,127 @@
 import os
-import uuid
+import logging
+from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import (
-    Application,
+    ApplicationBuilder,
+    CommandHandler,
     MessageHandler,
     filters,
     ContextTypes,
 )
 from pymongo import MongoClient
 
-# ====== CONFIG ======
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-MONGO_URL = os.getenv("MONGO_URL")
+# -------- CONFIG --------
+BOT_TOKEN = "YOUR_BOT_TOKEN"
+MONGO_URL = "YOUR_MONGO_URL"
+ADMIN_ID = 123456789  # <-- your Telegram ID
+CHANNEL_ID = "@YourChannelUsername"
+USER_TIMER_HOURS = 3
 
-CHANNEL_LINK = "https://t.me/+CLfnma8b2jM0YWQ1"   # your channel invite
-CHANNEL_ID = -1003510118476                     # your channel ID
-BASE_LINK = "https://t.me/SpicyParlourCool_bot?start="  # change bot username
+# -------- LOGGING --------
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-# ====================
+# -------- DATABASE --------
+client = MongoClient(MONGO_URL)
+db = client["telegram_bot"]
+users_collection = db["users"]
 
-mongo = MongoClient(MONGO_URL)
-db = mongo["filebot"]
-files_col = db["files"]
-
-
-async def is_joined(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        member = await context.bot.get_chat_member(
-            CHANNEL_ID, update.effective_user.id
-        )
-        return member.status in ["member", "administrator", "creator"]
-    except:
+# -------- HELPERS --------
+def is_user_allowed(user_id):
+    """Check if user is within allowed time limit."""
+    if user_id == ADMIN_ID:
+        return True
+    user = users_collection.find_one({"user_id": user_id})
+    if not user:
         return False
+    if datetime.utcnow() < user["expiry"]:
+        return True
+    return False
 
-
-async def force_join(update: Update):
-    await update.message.reply_text(
-        "🚫 **You must join our channel to access files**\n\n"
-        f"👉 Join here: {CHANNEL_LINK}\n\n"
-        "After joining, **open the file link again**.",
-        disable_web_page_preview=True
+def add_or_update_user(user_id):
+    """Add new user or refresh expiry."""
+    expiry_time = datetime.utcnow() + timedelta(hours=USER_TIMER_HOURS)
+    users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"expiry": expiry_time}},
+        upsert=True
     )
 
-
-async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await is_joined(update, context):
-        await force_join(update)
+# -------- HANDLERS --------
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not await check_channel_membership(update, user.id):
         return
-
-    msg = update.message
-    file_id = (
-        msg.document.file_id if msg.document else
-        msg.video.file_id if msg.video else
-        msg.audio.file_id if msg.audio else
-        msg.photo[-1].file_id
-    )
-
-    unique_id = str(uuid.uuid4())[:8]
-
-    files_col.insert_one({
-        "_id": unique_id,
-        "file_id": file_id
-    })
-
-    link = BASE_LINK + unique_id
-
-    await msg.reply_text(
-        "✅ **File stored successfully!**\n\n"
-        "🔗 **Permanent Link:**\n"
-        f"{link}\n\n"
-        "⚠️ File cannot be downloaded inside bot.",
-        disable_web_page_preview=True
-    )
-
+    add_or_update_user(user.id)
+    await update.message.reply_text("Welcome! You can now send files to get shareable links.")
 
 async def start_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
+    await start(update, context)
+
+async def handle_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not await check_channel_membership(update, user.id):
+        return
+    if not is_user_allowed(user.id):
+        await update.message.reply_text("⏳ Your 3-hour access has expired. Send /start again to refresh.")
         return
 
-    if not await is_joined(update, context):
-        await force_join(update)
-        return
+    file = None
+    file_type = None
 
-    file_code = context.args[0]
-    data = files_col.find_one({"_id": file_code})
+    if update.message.document:
+        file = update.message.document
+        file_type = "Document"
+    elif update.message.video:
+        file = update.message.video
+        file_type = "Video"
+    elif update.message.audio:
+        file = update.message.audio
+        file_type = "Audio"
+    elif update.message.photo:
+        file = update.message.photo[-1]  # highest resolution
+        file_type = "Photo"
 
-    if not data:
-        await update.message.reply_text("❌ File not found.")
-        return
+    if file:
+        file_link = await file.get_file()
+        await update.message.reply_text(f"✅ {file_type} link:\n{file_link.file_path}")
+    else:
+        await update.message.reply_text("❌ Unsupported file type.")
 
-    await context.bot.send_document(
-        chat_id=update.effective_user.id,
-        document=data["file_id"]
+# -------- CHANNEL CHECK --------
+async def check_channel_membership(update: Update, user_id):
+    """Force user to join channel before using bot."""
+    try:
+        member = await context.bot.get_chat_member(CHANNEL_ID, user_id)
+        if member.status in ["member", "administrator", "creator"]:
+            return True
+    except:
+        pass
+    await update.message.reply_text(
+        f"⚠️ You must join the channel {CHANNEL_ID} to use this bot."
     )
+    return False
 
-
+# -------- MAIN --------
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    app.add_handler(MessageHandler(filters.DOCUMENT, handle_files))
-app.add_handler(MessageHandler(filters.VIDEO, handle_files))
-app.add_handler(MessageHandler(filters.AUDIO, handle_files))
-app.add_handler(MessageHandler(filters.PHOTO, handle_files))
-    app.add_handler(MessageHandler(filters.Regex("^/start "), start_link))
+    # Command handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.Regex(r"^/start "), start_link))
+
+    # File handlers
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.VIDEO.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.AUDIO.ALL, handle_files))
+    app.add_handler(MessageHandler(filters.PHOTO.ALL, handle_files))
 
     print("🤖 Bot is running...")
     app.run_polling()
 
-
+# -------- RUN --------
 if __name__ == "__main__":
     main()
