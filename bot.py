@@ -1,118 +1,110 @@
 import os
-import sys
 import logging
 from pyrogram import Client, filters
-from pyrogram.types import Message
-from pyrogram.enums import ChatMemberStatus
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# -------------------- LOGGING --------------------
+# -------------------------------
+# Logging
+# -------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# -------------------- ENV VALIDATION --------------------
-REQUIRED = ["API_ID", "API_HASH", "BOT_TOKEN", "DB_CHANNEL_ID", "FORCE_SUB_CHANNEL", "ADMIN_IDS"]
-missing = [v for v in REQUIRED if not os.environ.get(v)]
+# -------------------------------
+# Environment Variables
+# -------------------------------
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-if missing:
-    logging.error("❌ Missing environment variables:")
-    for v in missing:
-        logging.error(f"- {v}")
-    sys.exit(1)
+# Force join channel
+FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL", "-1003738214954"))
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-DB_CHANNEL_ID = int(os.environ["DB_CHANNEL_ID"])
-FORCE_SUB_CHANNEL = int(os.environ["FORCE_SUB_CHANNEL"])
-ADMIN_IDS = list(map(int, os.environ["ADMIN_IDS"].split(",")))
+# Admin IDs (comma-separated)
+ADMIN_IDS = [int(x) for x in os.environ.get("ADMIN_IDS", "").split() if x]
 
-# -------------------- BOT --------------------
+# Database channel for storing file IDs (if needed)
+DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID", "-1003738214954"))
+
+# -------------------------------
+# Initialize Bot
+# -------------------------------
 app = Client(
-    "file_store_bot",
+    "spicy_parlour_bot",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN
 )
 
-# -------------------- HELPERS --------------------
-def is_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
+# -------------------------------
+# Start Command - Force Join
+# -------------------------------
+@app.on_message(filters.private & filters.command("start"))
+async def start(client, message):
+    user_id = message.from_user.id
+    try:
+        # Check if user is in channel
+        member = await client.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+        if member.status != "kicked":
+            await message.reply_text(
+                "✅ You are already joined! You can now upload files."
+            )
+        else:
+            raise Exception
+    except:
+        # User not in channel
+        join_button = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔒 Join Channel", url="https://t.me/+K7hqRdOzClg1YTg1")]]
+        )
+        await message.reply_text(
+            "🔒 Join the channel to use this bot.",
+            reply_markup=join_button
+        )
 
+# -------------------------------
+# Admin Command Example
+# -------------------------------
+@app.on_message(filters.private & filters.command("admin"))
+async def admin_command(client, message):
+    user_id = message.from_user.id
+    if user_id not in ADMIN_IDS:
+        await message.reply_text("❌ Action not allowed.")
+        return
+    await message.reply_text("✅ You are an admin!")
 
-async def is_subscribed(client: Client, user_id: int) -> bool:
+# -------------------------------
+# File Upload Handler
+# -------------------------------
+@app.on_message(filters.private & (filters.document | filters.video | filters.photo | filters.audio))
+async def handle_file(client, message):
+    user_id = message.from_user.id
+    # Force join check
     try:
         member = await client.get_chat_member(FORCE_SUB_CHANNEL, user_id)
-        return member.status in (
-            ChatMemberStatus.MEMBER,
-            ChatMemberStatus.ADMINISTRATOR,
-            ChatMemberStatus.OWNER,
-        )
+        if member.status == "kicked":
+            raise Exception
     except:
-        return False
-
-# -------------------- /start --------------------
-@app.on_message(filters.private & filters.command("start"))
-async def start_handler(client: Client, message: Message):
-    user_id = message.from_user.id
-
-    if not await is_subscribed(client, user_id):
-        return await message.reply(
-            "🔒 **Join the channel to use this bot.**"
+        join_button = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔒 Join Channel", url="https://t.me/+K7hqRdOzClg1YTg1")]]
         )
-
-    if len(message.command) == 1:
-        return await message.reply(
-            "📦 **Secure File Store Bot**\n\n"
-            "• Files are accessed only via links\n"
-            "• Forwarding & saving disabled\n"
-            "• Admin-only uploads"
+        await message.reply_text(
+            "🔒 You must join the channel to use the bot.",
+            reply_markup=join_button
         )
-
-    file_id = message.command[1]
-
-    try:
-        msg = await client.get_messages(DB_CHANNEL_ID, int(file_id))
-        await msg.copy(
-            message.chat.id,
-            protect_content=True
-        )
-    except:
-        await message.reply("❌ Invalid or expired link.")
-
-# -------------------- ADMIN UPLOAD --------------------
-@app.on_message(
-    filters.private
-    & (filters.document | filters.video | filters.photo | filters.audio)
-)
-async def admin_upload(client: Client, message: Message):
-    # Ignore commands
-    if message.text and message.text.startswith("/"):
         return
 
-    if not is_admin(message.from_user.id):
-        return await message.reply("❌ Only admins can upload files.")
+    # Forward file to DB channel
+    sent_msg = await message.forward(chat_id=DB_CHANNEL_ID)
 
-    stored = await message.copy(
-        DB_CHANNEL_ID,
-        protect_content=True
-    )
+    # Generate shareable link
+    file_id = sent_msg.message_id
+    link = f"https://t.me/c/{str(DB_CHANNEL_ID)[4:]}/{file_id}"
+    await message.reply_text(f"✅ File stored! Here is your shareable link:\n{link}")
 
-    bot_username = (await client.get_me()).username
-    link = f"https://t.me/{bot_username}?start={stored.id}"
-
-    await message.reply(
-        "✅ **File Stored Successfully**\n\n"
-        f"🔗 **Permanent Link:**\n{link}"
-    )
-
-# -------------------- BLOCK EVERYTHING ELSE --------------------
-@app.on_message(filters.private)
-async def block_all(client: Client, message: Message):
-    await message.reply("❌ Action not allowed.")
-
-# -------------------- RUN --------------------
+# -------------------------------
+# Run Bot
+# -------------------------------
 if __name__ == "__main__":
     logging.info("🤖 Bot started successfully")
     app.run()
