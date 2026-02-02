@@ -1,15 +1,34 @@
 import os
+import sys
+import traceback
 from datetime import datetime
+
 from pyrogram import Client, filters
+from pyrogram.errors import UserNotParticipant
 from pyrogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    BotCommand
+    BotCommand,
+    BotCommandScopeChat,
+    BotCommandScopeDefault
 )
-from pyrogram.enums import BotCommandScopeChat, BotCommandScopeDefault
-from pyrogram.errors import UserNotParticipant
 
 # ─── ENV VARIABLES ─────────────────────
+REQUIRED_VARS = [
+    "API_ID",
+    "API_HASH",
+    "BOT_TOKEN",
+    "ADMIN_ID",
+    "DB_CHANNEL",
+    "FORCE_CHANNEL",
+    "LOG_CHANNEL"
+]
+
+missing = [v for v in REQUIRED_VARS if not os.getenv(v)]
+if missing:
+    print(f"❌ Missing ENV variables: {', '.join(missing)}")
+    sys.exit(1)
+
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -28,6 +47,13 @@ app = Client(
 ALBUM_CACHE = {}
 USERS = set()
 
+# ─── SAFE LOGGER ───────────────────────
+async def safe_log(text: str):
+    try:
+        await app.send_message(LOG_CHANNEL, text)
+    except:
+        pass
+
 # ─── FORCE JOIN CHECK ──────────────────
 async def check_join(client, user_id):
     if user_id == ADMIN_ID:
@@ -41,31 +67,29 @@ async def check_join(client, user_id):
         return False
 
 # ─── ACCESS LOGGER ─────────────────────
-async def log_access(client, user, file_id):
+async def log_access(user, file_id):
     text = (
         "📥 FILE ACCESS LOG\n\n"
         f"👤 User: {user.first_name} ({user.id})\n"
         f"📦 File ID: {file_id}\n"
         f"🕒 Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
     )
-    await client.send_message(LOG_CHANNEL, text)
+    await safe_log(text)
 
 # ─── ADMIN COMMAND MENU ────────────────
 async def setup_commands(client):
-    # Remove commands for everyone
+    # Clear commands for everyone
     await client.set_bot_commands(
         commands=[],
         scope=BotCommandScopeDefault()
     )
 
     # Admin-only commands
-    admin_commands = [
-        BotCommand("admin", "Admin panel"),
-        BotCommand("stats", "Bot statistics")
-    ]
-
     await client.set_bot_commands(
-        commands=admin_commands,
+        commands=[
+            BotCommand("admin", "Admin panel"),
+            BotCommand("stats", "Bot statistics")
+        ],
         scope=BotCommandScopeChat(chat_id=ADMIN_ID)
     )
 
@@ -78,7 +102,7 @@ async def start(client, message):
         await message.reply(
             "🔒 You must join our channel to use this bot.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📢 Join Channel", url="https://t.me/YOUR_CHANNEL")]]
+                [[InlineKeyboardButton("📢 Join Channel", url="https://t.me/+r7j8QFkHrPAzNDU1")]]
             )
         )
         return
@@ -91,10 +115,8 @@ async def start(client, message):
         )
         return
 
-    key = message.command[1]
-
     try:
-        msg_id = int(key)
+        msg_id = int(message.command[1])
         msg = await client.get_messages(DB_CHANNEL, msg_id)
 
         if msg.media_group_id:
@@ -106,7 +128,7 @@ async def start(client, message):
                     m.id,
                     protect_content=True
                 )
-            await log_access(client, message.from_user, f"Album:{msg_id}")
+            await log_access(message.from_user, f"Album:{msg_id}")
         else:
             await client.copy_message(
                 message.chat.id,
@@ -114,9 +136,9 @@ async def start(client, message):
                 msg.id,
                 protect_content=True
             )
-            await log_access(client, message.from_user, msg_id)
+            await log_access(message.from_user, msg_id)
 
-    except:
+    except Exception:
         await message.reply("❌ Invalid or removed link.")
 
 # ─── ADMIN: SINGLE FILE ────────────────
@@ -126,10 +148,9 @@ async def start(client, message):
     filters.user(ADMIN_ID) &
     ~filters.media_group
 )
-async def save_single_file(client, message):
+async def save_single(client, message):
     sent = await message.copy(DB_CHANNEL)
     link = f"https://t.me/{client.me.username}?start={sent.id}"
-
     await message.reply(f"✅ File stored\n\n🔗 {link}")
 
 # ─── ADMIN: ALBUM ──────────────────────
@@ -140,9 +161,7 @@ async def save_single_file(client, message):
 )
 async def save_album(client, message):
     gid = message.media_group_id
-
-    if gid not in ALBUM_CACHE:
-        ALBUM_CACHE[gid] = []
+    ALBUM_CACHE.setdefault(gid, [])
 
     sent = await message.copy(DB_CHANNEL)
     ALBUM_CACHE[gid].append(sent.id)
@@ -162,22 +181,23 @@ async def block_users(_, message):
 # ─── ADMIN COMMANDS ────────────────────
 @app.on_message(filters.command("admin") & filters.user(ADMIN_ID))
 async def admin_panel(_, message):
-    await message.reply(
-        "👑 Admin Panel\n\n"
-        "/stats – Bot statistics"
-    )
+    await message.reply("👑 Admin Panel\n\n/stats – Bot statistics")
 
 @app.on_message(filters.command("stats") & filters.user(ADMIN_ID))
 async def stats(_, message):
-    await message.reply(
-        f"📊 Bot Stats\n\n"
-        f"👥 Users: {len(USERS)}"
-    )
+    await message.reply(f"📊 Bot Stats\n\n👥 Users: {len(USERS)}")
+
+# ─── GLOBAL ERROR HANDLER ───────────────
+@app.on_error()
+async def error_handler(_, error):
+    tb = "".join(traceback.format_exception(None, error, error.__traceback__))
+    await safe_log(f"❌ BOT ERROR\n\n{tb[:3500]}")
 
 # ─── RUN ───────────────────────────────
 async def main():
     await app.start()
     await setup_commands(app)
+    await safe_log("✅ Bot started / restarted successfully")
     await app.idle()
 
 app.run(main)
