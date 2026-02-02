@@ -1,218 +1,183 @@
 import os
-import logging
-import random
-import string
-from dotenv import load_dotenv
+from datetime import datetime
 from pyrogram import Client, filters
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    BotCommand
+)
+from pyrogram.enums import BotCommandScopeChat, BotCommandScopeDefault
 from pyrogram.errors import UserNotParticipant
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message, CallbackQuery
-from pymongo import MongoClient
-from flask import Flask
-from threading import Thread
 
-# --- Flask Web Server ---
-flask_app = Flask(__name__)
+# ─── ENV VARIABLES ─────────────────────
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID"))
+DB_CHANNEL = int(os.getenv("DB_CHANNEL"))
+FORCE_CHANNEL = int(os.getenv("FORCE_CHANNEL"))
+LOG_CHANNEL = int(os.getenv("LOG_CHANNEL"))
 
-@flask_app.route('/')
-def index():
-    return "Bot is alive!", 200
+app = Client(
+    "secure_file_store_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
-def run_flask():
-    port = int(os.environ.get('PORT', 8080))
-    flask_app.run(host='0.0.0.0', port=port)
+ALBUM_CACHE = {}
+USERS = set()
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
-
-# --- Load Environment Variables ---
-load_dotenv()
-
-API_ID = int(os.environ.get("API_ID"))
-API_HASH = os.environ.get("API_HASH")
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-MONGO_URI = os.environ.get("MONGO_URI")
-LOG_CHANNEL = int(os.environ.get("LOG_CHANNEL"))
-UPDATE_CHANNEL = os.environ.get("UPDATE_CHANNEL")
-
-ADMIN_IDS_STR = os.environ.get("ADMIN_IDS", "")
-ADMINS = [int(admin_id.strip()) for admin_id in ADMIN_IDS_STR.split(',') if admin_id]
-
-# --- MongoDB Setup ---
-try:
-    client = MongoClient(MONGO_URI)
-    db = client['file_link_bot']
-    files_collection = db['files']
-    settings_collection = db['settings']
-    logging.info("✅ MongoDB Connected Successfully!")
-except Exception as e:
-    logging.error(f"❌ Error connecting to MongoDB: {e}")
-    exit()
-
-# --- Pyrogram Client ---
-app = Client("FileLinkBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# --- Helpers ---
-def generate_random_string(length=6):
-    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=length))
-
-async def is_user_member(client: Client, user_id: int) -> bool:
-    if user_id in ADMINS:
-        return True  # Skip join check for admins
+# ─── FORCE JOIN CHECK ──────────────────
+async def check_join(client, user_id):
+    if user_id == ADMIN_ID:
+        return True
     try:
-        await client.get_chat_member(chat_id=f"@{UPDATE_CHANNEL}", user_id=user_id)
+        await client.get_chat_member(FORCE_CHANNEL, user_id)
         return True
     except UserNotParticipant:
         return False
-    except Exception as e:
-        logging.error(f"Error checking membership for {user_id}: {e}")
+    except:
         return False
 
-async def get_bot_mode() -> str:
-    try:
-        setting = settings_collection.find_one({"_id": "bot_mode"})
-        if setting:
-            return setting.get("mode", "public")
-        settings_collection.update_one({"_id": "bot_mode"}, {"$set": {"mode": "public"}}, upsert=True)
-    except Exception as e:
-        logging.error(f"Error fetching bot mode: {e}")
-    return "public"
+# ─── ACCESS LOGGER ─────────────────────
+async def log_access(client, user, file_id):
+    text = (
+        "📥 FILE ACCESS LOG\n\n"
+        f"👤 User: {user.first_name} ({user.id})\n"
+        f"📦 File ID: {file_id}\n"
+        f"🕒 Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    )
+    await client.send_message(LOG_CHANNEL, text)
 
-def get_file_record(file_id: str):
-    try:
-        return files_collection.find_one({"_id": file_id})
-    except Exception as e:
-        logging.error(f"Error fetching file {file_id}: {e}")
-        return None
+# ─── ADMIN COMMAND MENU ────────────────
+async def setup_commands(client):
+    # Remove commands for everyone
+    await client.set_bot_commands(
+        commands=[],
+        scope=BotCommandScopeDefault()
+    )
 
-# --- Bot Handlers ---
-@app.on_message(filters.command("start") & filters.private)
-async def start_handler(client: Client, message: Message):
-    if len(message.command) > 1:
-        file_id_str = message.command[1]
+    # Admin-only commands
+    admin_commands = [
+        BotCommand("admin", "Admin panel"),
+        BotCommand("stats", "Bot statistics")
+    ]
 
-        if not await is_user_member(client, message.from_user.id):
-            join_button = InlineKeyboardButton("🔗 Join Channel", url=f"https://t.me/{UPDATE_CHANNEL}")
-            check_button = InlineKeyboardButton("✅ I Have Joined", callback_data=f"check_join_{file_id_str}")
-            keyboard = InlineKeyboardMarkup([[join_button], [check_button]])
+    await client.set_bot_commands(
+        commands=admin_commands,
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
+    )
 
-            await message.reply(
-                f"👋 **Hello, {message.from_user.first_name}!**\n\n"
-                f"Ye file access karne ke liye, aapko hamara update channel join karna hoga.",
-                reply_markup=keyboard
+# ─── START COMMAND ─────────────────────
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    USERS.add(message.from_user.id)
+
+    if not await check_join(client, message.from_user.id):
+        await message.reply(
+            "🔒 You must join our channel to use this bot.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📢 Join Channel", url="https://t.me/YOUR_CHANNEL")]]
             )
-            return
-
-        file_record = get_file_record(file_id_str)
-        if file_record:
-            try:
-                await client.copy_message(chat_id=message.from_user.id, from_chat_id=LOG_CHANNEL, message_id=file_record['message_id'])
-            except Exception as e:
-                await message.reply(f"❌ File bhejte waqt error aa gaya.\n`Error: {e}`")
-        else:
-            await message.reply("🤔 File not found! Ho sakta hai link galat ya expire ho gaya ho.")
-    else:
-        await message.reply("**Hello! Mai ek File-to-Link bot hu.**\n\nMujhe koi bhi file bhejo, aur mai aapko uska ek shareable link dunga.")
-
-@app.on_message(filters.private & (filters.document | filters.video | filters.photo | filters.audio))
-async def file_handler(client: Client, message: Message):
-    bot_mode = await get_bot_mode()
-    if bot_mode == "private" and message.from_user.id not in ADMINS:
-        await message.reply("😔 **Sorry!** Abhi sirf Admins hi files upload kar sakte hain.")
-        return
-
-    status_msg = await message.reply("⏳ Please wait, file upload kar raha hu...", quote=True)
-
-    try:
-        forwarded_message = await message.forward(LOG_CHANNEL)
-        file_id_str = generate_random_string()
-        try:
-            files_collection.insert_one({'_id': file_id_str, 'message_id': forwarded_message.id})
-        except Exception as e:
-            logging.error(f"Error inserting file record: {e}")
-
-        bot_username = (await client.get_me()).username
-        share_link = f"https://t.me/{bot_username}?start={file_id_str}"
-        await status_msg.edit_text(
-            f"✅ **Link Generated Successfully!**\n\n🔗 Your Link: `{share_link}`",
-            disable_web_page_preview=True
         )
-    except Exception as e:
-        logging.error(f"File handling error: {e}")
-        await status_msg.edit_text(f"❌ **Error!**\n\nKuch galat ho gaya. Please try again.\n`Details: {e}`")
-
-@app.on_message(filters.command("settings") & filters.private)
-async def settings_handler(client: Client, message: Message):
-    if message.from_user.id not in ADMINS:
-        await message.reply("❌ Aapke paas is command ko use karne ki permission nahi hai.")
         return
 
-    current_mode = await get_bot_mode()
-
-    public_button = InlineKeyboardButton("🌍 Public (Anyone)", callback_data="set_mode_public")
-    private_button = InlineKeyboardButton("🔒 Private (Admins Only)", callback_data="set_mode_private")
-    keyboard = InlineKeyboardMarkup([[public_button], [private_button]])
-
-    await message.reply(
-        f"⚙️ **Bot Settings**\n\n"
-        f"Abhi bot ka file upload mode **{current_mode.upper()}** hai.\n\n"
-        f"Naya mode select karein:",
-        reply_markup=keyboard
-    )
-
-@app.on_callback_query(filters.regex(r"^set_mode_"))
-async def set_mode_callback(client: Client, callback_query: CallbackQuery):
-    if callback_query.from_user.id not in ADMINS:
-        await callback_query.answer("Permission Denied!", show_alert=True)
+    if len(message.command) == 1:
+        await message.reply(
+            "👋 Welcome\n\n"
+            "Use the shared link to access files.\n"
+            "Forwarding is restricted."
+        )
         return
 
-    new_mode = callback_query.data.split("_")[2]
+    key = message.command[1]
+
     try:
-        settings_collection.update_one({"_id": "bot_mode"}, {"$set": {"mode": new_mode}}, upsert=True)
-    except Exception as e:
-        logging.error(f"Error updating bot mode: {e}")
-        await callback_query.answer("❌ Could not update mode!", show_alert=True)
-        return
+        msg_id = int(key)
+        msg = await client.get_messages(DB_CHANNEL, msg_id)
 
-    await callback_query.answer(f"Mode successfully {new_mode.upper()} par set ho gaya hai!", show_alert=True)
+        if msg.media_group_id:
+            media = await client.get_media_group(DB_CHANNEL, msg.id)
+            for m in media:
+                await client.copy_message(
+                    message.chat.id,
+                    DB_CHANNEL,
+                    m.id,
+                    protect_content=True
+                )
+            await log_access(client, message.from_user, f"Album:{msg_id}")
+        else:
+            await client.copy_message(
+                message.chat.id,
+                DB_CHANNEL,
+                msg.id,
+                protect_content=True
+            )
+            await log_access(client, message.from_user, msg_id)
 
-    public_button = InlineKeyboardButton("🌍 Public (Anyone)", callback_data="set_mode_public")
-    private_button = InlineKeyboardButton("🔒 Private (Admins Only)", callback_data="set_mode_private")
-    keyboard = InlineKeyboardMarkup([[public_button], [private_button]])
+    except:
+        await message.reply("❌ Invalid or removed link.")
 
-    await callback_query.message.edit_text(
-        f"⚙️ **Bot Settings**\n\n"
-        f"✅ Bot ka file upload mode ab **{new_mode.upper()}** hai.\n\n"
-        f"Naya mode select karein:",
-        reply_markup=keyboard
+# ─── ADMIN: SINGLE FILE ────────────────
+@app.on_message(
+    filters.private &
+    filters.media &
+    filters.user(ADMIN_ID) &
+    ~filters.media_group
+)
+async def save_single_file(client, message):
+    sent = await message.copy(DB_CHANNEL)
+    link = f"https://t.me/{client.me.username}?start={sent.id}"
+
+    await message.reply(f"✅ File stored\n\n🔗 {link}")
+
+# ─── ADMIN: ALBUM ──────────────────────
+@app.on_message(
+    filters.private &
+    filters.media_group &
+    filters.user(ADMIN_ID)
+)
+async def save_album(client, message):
+    gid = message.media_group_id
+
+    if gid not in ALBUM_CACHE:
+        ALBUM_CACHE[gid] = []
+
+    sent = await message.copy(DB_CHANNEL)
+    ALBUM_CACHE[gid].append(sent.id)
+
+    if len(ALBUM_CACHE[gid]) == message.media_group_count:
+        first_id = ALBUM_CACHE[gid][0]
+        link = f"https://t.me/{client.me.username}?start={first_id}"
+        await message.reply(f"✅ Album stored\n\n🔗 {link}")
+        del ALBUM_CACHE[gid]
+
+# ─── BLOCK USER UPLOADS ─────────────────
+@app.on_message(filters.private & filters.media)
+async def block_users(_, message):
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("🚫 Only admin can upload files.")
+
+# ─── ADMIN COMMANDS ────────────────────
+@app.on_message(filters.command("admin") & filters.user(ADMIN_ID))
+async def admin_panel(_, message):
+    await message.reply(
+        "👑 Admin Panel\n\n"
+        "/stats – Bot statistics"
     )
 
-@app.on_callback_query(filters.regex(r"^check_join_"))
-async def check_join_callback(client: Client, callback_query: CallbackQuery):
-    user_id = callback_query.from_user.id
-    file_id_str = callback_query.data.split("_", 2)[2]
+@app.on_message(filters.command("stats") & filters.user(ADMIN_ID))
+async def stats(_, message):
+    await message.reply(
+        f"📊 Bot Stats\n\n"
+        f"👥 Users: {len(USERS)}"
+    )
 
-    if await is_user_member(client, user_id):
-        await callback_query.answer("Thanks for joining! File bhej raha hu...", show_alert=True)
-        file_record = get_file_record(file_id_str)
-        if file_record:
-            try:
-                await client.copy_message(chat_id=user_id, from_chat_id=LOG_CHANNEL, message_id=file_record['message_id'])
-                await callback_query.message.delete()
-            except Exception as e:
-                await callback_query.message.edit_text(f"❌ File bhejte waqt error aa gaya.\n`Error: {e}`")
-        else:
-            await callback_query.message.edit_text("🤔 File not found!")
-    else:
-        await callback_query.answer("Aapne abhi tak channel join nahi kiya hai. Please join karke dobara try karein.", show_alert=True)
+# ─── RUN ───────────────────────────────
+async def main():
+    await app.start()
+    await setup_commands(app)
+    await app.idle()
 
-# --- Start Bot ---
-if __name__ == "__main__":
-    if not ADMINS:
-        logging.warning("⚠️ ADMIN_IDS is not set. Settings command kaam nahi karega.")
-
-    # Start Flask in a separate thread
-    logging.info("Starting Flask web server...")
-    Thread(target=run_flask).start()
-
-    logging.info("Starting Pyrogram bot...")
-    app.run()
+app.run(main)
