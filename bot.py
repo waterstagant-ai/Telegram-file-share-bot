@@ -37,6 +37,16 @@ COMMAND_BUTTONS = ReplyKeyboardMarkup(
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
     user_id = message.from_user.id
+
+    # Admin bypass
+    if user_id in ADMIN_IDS:
+        await message.reply_text(
+            "✅ Welcome Admin! You can now upload your files.",
+            reply_markup=COMMAND_BUTTONS
+        )
+        return
+
+    # Force join check for normal users
     try:
         member = await client.get_chat_member(FORCE_SUB_CHANNEL, user_id)
         if member.status in ["member", "creator", "administrator"]:
@@ -92,20 +102,21 @@ async def help_cmd(client, message):
 async def handle_file(client, message):
     user_id = message.from_user.id
 
-    # Force join check
-    try:
-        member = await client.get_chat_member(FORCE_SUB_CHANNEL, user_id)
-        if member.status not in ["member", "creator", "administrator"]:
-            raise Exception
-    except:
-        join_button = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔒 Join Channel", url="https://t.me/+K7hqRdOzClg1YTg1")]]
-        )
-        await message.reply_text(
-            "🔒 You must join the channel to use the bot.",
-            reply_markup=join_button
-        )
-        return
+    # Admin bypass for force join
+    if user_id not in ADMIN_IDS:
+        try:
+            member = await client.get_chat_member(FORCE_SUB_CHANNEL, user_id)
+            if member.status not in ["member", "creator", "administrator"]:
+                raise Exception
+        except:
+            join_button = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("🔒 Join Channel", url="https://t.me/+K7hqRdOzClg1YTg1")]]
+            )
+            await message.reply_text(
+                "🔒 You must join the channel to use the bot.",
+                reply_markup=join_button
+            )
+            return
 
     # File accepted, create a shareable Telegram link
     file_id = None
