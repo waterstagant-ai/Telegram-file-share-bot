@@ -13,191 +13,153 @@ from pyrogram.types import (
     BotCommandScopeDefault
 )
 
-# ─── ENV VARIABLES ─────────────────────
-REQUIRED_VARS = [
-    "API_ID",
-    "API_HASH",
-    "BOT_TOKEN",
-    "ADMIN_ID",
-    "DB_CHANNEL",
-    "FORCE_CHANNEL",
-    "LOG_CHANNEL"
-]
+# ===================== CONFIG =====================
 
-missing = [v for v in REQUIRED_VARS if not os.getenv(v)]
-if missing:
-    print(f"❌ Missing ENV variables: {', '.join(missing)}")
-    sys.exit(1)
+API_ID = int(os.environ.get("API_ID"))
+API_HASH = os.environ.get("API_HASH")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-DB_CHANNEL = int(os.getenv("DB_CHANNEL"))
-FORCE_CHANNEL = int(os.getenv("FORCE_CHANNEL"))
-LOG_CHANNEL = int(os.getenv("LOG_CHANNEL"))
+# Channel used as "database" (PRIVATE channel, bot must be admin)
+DB_CHANNEL_ID = int(os.environ.get("DB_CHANNEL_ID"))
+
+# Force join channel
+FORCE_SUB_CHANNEL = int(os.environ.get("FORCE_SUB_CHANNEL"))
+
+# Admin IDs (comma separated)
+ADMIN_IDS = list(map(int, os.environ.get("ADMIN_IDS", "").split(",")))
+
+# ===================== BOT =====================
 
 app = Client(
-    "secure_file_store_bot",
+    "file_store_bot",
     api_id=API_ID,
     api_hash=API_HASH,
-    bot_token=BOT_TOKEN
+    bot_token=BOT_TOKEN,
+    in_memory=True
 )
 
-ALBUM_CACHE = {}
-USERS = set()
+# ===================== HELPERS =====================
 
-# ─── SAFE LOGGER ───────────────────────
-async def safe_log(text: str):
-    try:
-        await app.send_message(LOG_CHANNEL, text)
-    except:
-        pass
+def is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
-# ─── FORCE JOIN CHECK ──────────────────
-async def check_join(client, user_id):
-    if user_id == ADMIN_ID:
-        return True
+
+async def force_sub_check(client, user_id: int):
     try:
-        await client.get_chat_member(FORCE_CHANNEL, user_id)
+        await client.get_chat_member(FORCE_SUB_CHANNEL, user_id)
         return True
     except UserNotParticipant:
         return False
-    except:
-        return False
 
-# ─── ACCESS LOGGER ─────────────────────
-async def log_access(user, file_id):
-    text = (
-        "📥 FILE ACCESS LOG\n\n"
-        f"👤 User: {user.first_name} ({user.id})\n"
-        f"📦 File ID: {file_id}\n"
-        f"🕒 Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
-    )
-    await safe_log(text)
 
-# ─── ADMIN COMMAND MENU ────────────────
-async def setup_commands(client):
-    # Clear commands for everyone
+def build_share_link(message_id: int) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start=file_{message_id}"
+
+
+# ===================== STARTUP CHECK =====================
+
+@app.on_start()
+async def startup(client):
+    global BOT_USERNAME
+    me = await client.get_me()
+    BOT_USERNAME = me.username
+
+    print("✅ Bot started successfully")
+    print(f"🤖 Username: @{BOT_USERNAME}")
+    print(f"📦 DB Channel: {DB_CHANNEL_ID}")
+
+    # Command menu → ONLY for admins
+    commands = [
+        BotCommand("start", "Start the bot"),
+    ]
+
+    for admin_id in ADMIN_IDS:
+        await client.set_bot_commands(
+            commands=commands,
+            scope=BotCommandScopeChat(chat_id=admin_id)
+        )
+
+    # Hide commands for everyone else
     await client.set_bot_commands(
         commands=[],
         scope=BotCommandScopeDefault()
     )
 
-    # Admin-only commands
-    await client.set_bot_commands(
-        commands=[
-            BotCommand("admin", "Admin panel"),
-            BotCommand("stats", "Bot statistics")
-        ],
-        scope=BotCommandScopeChat(chat_id=ADMIN_ID)
-    )
 
-# ─── START COMMAND ─────────────────────
-@app.on_message(filters.command("start"))
-async def start(client, message):
-    USERS.add(message.from_user.id)
+# ===================== START =====================
 
-    if not await check_join(client, message.from_user.id):
+@app.on_message(filters.command("start") & filters.private)
+async def start_handler(client, message):
+    user_id = message.from_user.id
+
+    if not await force_sub_check(client, user_id):
         await message.reply(
-            "🔒 You must join our channel to use this bot.",
+            "🔒 You must join the channel to use this bot.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("📢 Join Channel", url="https://t.me/+r7j8QFkHrPAzNDU1")]]
+                [[InlineKeyboardButton("Join Channel", url=f"https://t.me/c/{str(FORCE_SUB_CHANNEL)[4:]}")]]
             )
         )
         return
 
     if len(message.command) == 1:
-        await message.reply(
-            "👋 Welcome\n\n"
-            "Use the shared link to access files.\n"
-            "Forwarding is restricted."
-        )
+        await message.reply("👋 Send the file link to access content.")
         return
 
+    if not message.command[1].startswith("file_"):
+        return
+
+    msg_id = int(message.command[1].split("_")[1])
+
     try:
-        msg_id = int(message.command[1])
-        msg = await client.get_messages(DB_CHANNEL, msg_id)
-
-        if msg.media_group_id:
-            media = await client.get_media_group(DB_CHANNEL, msg.id)
-            for m in media:
-                await client.copy_message(
-                    message.chat.id,
-                    DB_CHANNEL,
-                    m.id,
-                    protect_content=True
-                )
-            await log_access(message.from_user, f"Album:{msg_id}")
-        else:
-            await client.copy_message(
-                message.chat.id,
-                DB_CHANNEL,
-                msg.id,
-                protect_content=True
-            )
-            await log_access(message.from_user, msg_id)
-
+        await client.copy_message(
+            chat_id=user_id,
+            from_chat_id=DB_CHANNEL_ID,
+            message_id=msg_id,
+            protect_content=True
+        )
     except Exception:
-        await message.reply("❌ Invalid or removed link.")
+        await message.reply("❌ File not found or removed.")
 
-# ─── ADMIN: SINGLE FILE ────────────────
-@app.on_message(
-    filters.private &
-    filters.media &
-    filters.user(ADMIN_ID) &
-    ~filters.media_group
-)
-async def save_single(client, message):
-    sent = await message.copy(DB_CHANNEL)
-    link = f"https://t.me/{client.me.username}?start={sent.id}"
-    await message.reply(f"✅ File stored\n\n🔗 {link}")
 
-# ─── ADMIN: ALBUM ──────────────────────
-@app.on_message(
-    filters.private &
-    filters.media_group &
-    filters.user(ADMIN_ID)
-)
-async def save_album(client, message):
-    gid = message.media_group_id
-    ALBUM_CACHE.setdefault(gid, [])
+# ===================== FILE UPLOAD =====================
 
-    sent = await message.copy(DB_CHANNEL)
-    ALBUM_CACHE[gid].append(sent.id)
-
-    if len(ALBUM_CACHE[gid]) == message.media_group_count:
-        first_id = ALBUM_CACHE[gid][0]
-        link = f"https://t.me/{client.me.username}?start={first_id}"
-        await message.reply(f"✅ Album stored\n\n🔗 {link}")
-        del ALBUM_CACHE[gid]
-
-# ─── BLOCK USER UPLOADS ─────────────────
 @app.on_message(filters.private & filters.media)
-async def block_users(_, message):
-    if message.from_user.id != ADMIN_ID:
-        await message.reply("🚫 Only admin can upload files.")
+async def file_upload(client, message):
+    if not is_admin(message.from_user.id):
+        return
 
-# ─── ADMIN COMMANDS ────────────────────
-@app.on_message(filters.command("admin") & filters.user(ADMIN_ID))
-async def admin_panel(_, message):
-    await message.reply("👑 Admin Panel\n\n/stats – Bot statistics")
+    sent = await message.copy(
+        chat_id=DB_CHANNEL_ID,
+        protect_content=True
+    )
 
-@app.on_message(filters.command("stats") & filters.user(ADMIN_ID))
-async def stats(_, message):
-    await message.reply(f"📊 Bot Stats\n\n👥 Users: {len(USERS)}")
+    link = build_share_link(sent.id)
 
-# ─── GLOBAL ERROR HANDLER ───────────────
+    await message.reply(
+        f"✅ File stored successfully\n\n🔗 **Shareable Link:**\n{link}",
+        disable_web_page_preview=True
+    )
+
+
+# ===================== PROTECTION =====================
+# Best possible protection Telegram allows:
+# - protect_content=True blocks forwarding & saving
+# - Users can still screenshot (Telegram limitation)
+
+# ===================== ERROR HANDLER =====================
+
 @app.on_error()
 async def error_handler(_, error):
-    tb = "".join(traceback.format_exception(None, error, error.__traceback__))
-    await safe_log(f"❌ BOT ERROR\n\n{tb[:3500]}")
+    print("❌ ERROR:", error)
+    traceback.print_exc()
 
-# ─── RUN ───────────────────────────────
-async def main():
-    await app.start()
-    await setup_commands(app)
-    await safe_log("✅ Bot started / restarted successfully")
-    await app.idle()
 
-app.run(main)
+# ===================== RUN =====================
+
+if __name__ == "__main__":
+    try:
+        app.run()
+    except Exception as e:
+        print("🔥 FATAL ERROR")
+        traceback.print_exc()
+        sys.exit(1)
